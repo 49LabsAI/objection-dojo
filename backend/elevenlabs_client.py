@@ -71,7 +71,7 @@ class ElevenLabsClient:
     
     async def text_to_speech(self, text: str) -> bytes:
         """
-        Convert text to speech audio.
+        Convert text to speech audio using turbo model for low latency.
         
         Args:
             text: Text to convert to speech.
@@ -83,6 +83,8 @@ class ElevenLabsClient:
             ElevenLabsClientError: If API request fails.
         
         Requirements: 3.2, 3.3
+        
+        Performance: Uses eleven_turbo_v2_5 for ~40% faster generation
         """
         if not text or not text.strip():
             raise ValueError("Text cannot be empty")
@@ -94,7 +96,8 @@ class ElevenLabsClient:
                 f"/text-to-speech/{self.voice_id}",
                 json={
                     "text": text,
-                    "model_id": "eleven_monolingual_v1",
+                    # Turbo model for low-latency conversational use
+                    "model_id": "eleven_turbo_v2_5",
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,

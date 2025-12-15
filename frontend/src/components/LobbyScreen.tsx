@@ -16,10 +16,20 @@ export default function LobbyScreen() {
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3 }}
-        className="text-3xl sm:text-4xl md:text-5xl font-bold text-primary mb-8 sm:mb-12 text-center px-2"
+        className="text-3xl sm:text-4xl md:text-5xl font-bold text-primary mb-4 sm:mb-6 text-center px-2"
       >
         Objection Dojo
       </motion.h1>
+
+      <motion.p
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.3, delay: 0.05 }}
+        className="text-clean-gray-500 text-center max-w-md mb-8 sm:mb-12 px-4 text-sm sm:text-base"
+      >
+        Practice handling sales objections with an AI-powered skeptical CTO. 
+        Use your voice to pitch and respond to objections.
+      </motion.p>
 
       <motion.button
         initial={{ opacity: 0, scale: 0.95 }}

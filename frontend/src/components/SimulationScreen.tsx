@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import ActionButton, { ActionButtonState } from "./ActionButton";
+import { ArrowLeft } from "lucide-react";
 import PatienceMeter from "./PatienceMeter";
 import GameOverScreen from "./GameOverScreen";
 import { useToast } from "./ToastProvider";
@@ -19,7 +20,7 @@ const WinScreen = dynamic(() => import("./WinScreen"), {
   ),
   ssr: false,
 });
-import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import { useVoiceActivityDetection } from "@/hooks/useVoiceActivityDetection";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 
 interface Message {
@@ -47,6 +48,8 @@ type GameStatus = "playing" | "won" | "lost";
  * - Composes ActionButton, PatienceMeter, conversation display
  */
 export default function SimulationScreen() {
+  const router = useRouter();
+  
   // Session state - generated once on mount
   const [sessionId] = useState<string>(() => crypto.randomUUID());
   const [patienceScore, setPatienceScore] = useState<number>(50);
@@ -54,30 +57,55 @@ export default function SimulationScreen() {
   const [conversationHistory, setConversationHistory] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
+  // Track if VAD should be active (disabled during AI response)
+  const [vadEnabled, setVadEnabled] = useState<boolean>(false);
+  const [hasStarted, setHasStarted] = useState<boolean>(false);
+
   // Hooks
   const { showToast } = useToast();
-  const { start, stop, transcript, isListening, isSupported, error: speechError } = useSpeechRecognition();
 
+  // Ref to hold sendMessage function for VAD callback
+  const sendMessageRef = useRef<((text: string) => Promise<void>) | null>(null);
 
-  // Audio player with onEnded callback to re-enable button
+  // Audio player - re-enable VAD when audio ends
   const handleAudioEnded = useCallback(() => {
-    // Audio finished, button will be re-enabled via isPlaying state
+    setVadEnabled(true);
   }, []);
 
   const { play: playAudio, isPlaying } = useAudioPlayer({
     onEnded: handleAudioEnded,
   });
 
-  // Derive button state from current conditions
-  const buttonState: ActionButtonState = (() => {
-    if (isPlaying || isLoading || gameStatus !== "playing") {
-      return "disabled";
+  // VAD callbacks
+  const handleSpeechEnd = useCallback((finalTranscript: string) => {
+    if (finalTranscript.trim().length > 0 && sendMessageRef.current) {
+      // Disable VAD while processing
+      setVadEnabled(false);
+      sendMessageRef.current(finalTranscript);
     }
-    if (isListening) {
-      return "recording";
-    }
-    return "idle";
-  })();
+  }, []);
+
+  const handleSpeechStart = useCallback(() => {
+    // Could add visual feedback here
+  }, []);
+
+  // VAD hook with auto-detection - optimized for natural conversation
+  const {
+    startListening,
+    stopListening,
+    transcript,
+    isListening,
+    isSpeaking,
+    isSupported,
+    error: speechError,
+  } = useVoiceActivityDetection({
+    // Optimized settings for fast, natural conversation flow
+    silenceThreshold: 800,  // 0.8s - faster response initiation
+    speechThreshold: 0.015, // Slightly higher to avoid false triggers
+    onSpeechEnd: handleSpeechEnd,
+    onSpeechStart: handleSpeechStart,
+    enabled: vadEnabled && !isPlaying && !isLoading && gameStatus === "playing",
+  });
 
   // Request microphone permission on mount (Requirement 1.4)
   useEffect(() => {
@@ -92,6 +120,14 @@ export default function SimulationScreen() {
 
     requestMicPermission();
   }, [showToast]);
+
+  // Stop VAD when game ends
+  useEffect(() => {
+    if (gameStatus !== "playing") {
+      setVadEnabled(false);
+      stopListening();
+    }
+  }, [gameStatus, stopListening]);
 
   // Show error if Web Speech API is not supported (Requirement 2.8)
   useEffect(() => {
@@ -112,19 +148,10 @@ export default function SimulationScreen() {
   }, [patienceScore, gameStatus]);
 
   /**
-   * Validates that transcript contains non-whitespace content.
-   * Property 1: Whitespace Input Rejection
-   */
-  const isValidTranscript = (text: string): boolean => {
-    return text.trim().length > 0;
-  };
-
-
-  /**
    * Sends user message to backend API and processes response.
    * Requirements: 2.6, 3.5, 4.1, 7.1, 7.2, 7.4
    */
-  const sendMessage = async (userText: string) => {
+  const sendMessage = useCallback(async (userText: string) => {
     // Store current patience for error recovery (Property 8: Error Preserves Patience)
     const patienceBeforeRequest = patienceScore;
 
@@ -175,45 +202,38 @@ export default function SimulationScreen() {
       }
 
       // Play audio response (Requirement 3.6)
+      // VAD will re-enable when audio ends via handleAudioEnded
       if (data.audio_base64) {
         playAudio(data.audio_base64);
+      } else {
+        // No audio, re-enable VAD immediately
+        setVadEnabled(true);
       }
     } catch (err) {
       console.error("Chat API error:", err);
       // Show error toast (Requirement 7.1)
       showToast("Connection unstable. Say that again?", "error");
       // Do NOT deduct patience on error (Requirement 7.2, Property 8)
-      // Patience remains at patienceBeforeRequest (already set)
+      // Re-enable VAD so user can try again
+      setVadEnabled(true);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [patienceScore, sessionId, playAudio, showToast]);
 
+  // Keep sendMessageRef in sync with sendMessage
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
 
   /**
-   * Handles ActionButton click - toggles recording state.
-   * Requirements: 2.2, 2.3, 2.4, 2.5, 2.6
+   * Starts the simulation - begins listening with VAD
    */
-  const handleActionButtonClick = () => {
-    if (isListening) {
-      // Stop recording and process transcript
-      stop();
-
-      // Validate transcript (Requirement 2.4, Property 1: Whitespace Input Rejection)
-      if (!isValidTranscript(transcript)) {
-        // Show toast for empty input (Requirement 2.5)
-        showToast("I didn't hear anything.", "info");
-        // Reset without API call (Requirement 2.4)
-        return;
-      }
-
-      // Valid text - send to API (Requirement 2.6, Property 2: Valid Text Triggers API Call)
-      sendMessage(transcript);
-    } else {
-      // Start recording (Requirement 2.2)
-      start();
-    }
-  };
+  const handleStartSimulation = useCallback(() => {
+    setHasStarted(true);
+    setVadEnabled(true);
+    startListening();
+  }, [startListening]);
 
   return (
     <div className="min-h-screen min-h-[100dvh] flex flex-col bg-clean-white w-full max-w-full overflow-x-hidden">
@@ -223,9 +243,18 @@ export default function SimulationScreen() {
         role="banner"
       >
         <div className="max-w-md mx-auto px-1">
-          <h1 className="text-lg sm:text-xl font-bold text-primary mb-3 sm:mb-4 text-center">
-            Objection Dojo
-          </h1>
+          <div className="flex items-center justify-center relative mb-3 sm:mb-4">
+            <button
+              onClick={() => router.push("/")}
+              className="absolute left-0 p-2 -ml-2 text-clean-gray-400 hover:text-primary transition-colors rounded-lg hover:bg-clean-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-300"
+              aria-label="Return to lobby"
+            >
+              <ArrowLeft size={20} />
+            </button>
+            <h1 className="text-lg sm:text-xl font-bold text-primary text-center">
+              Objection Dojo
+            </h1>
+          </div>
           <PatienceMeter value={patienceScore} />
         </div>
       </header>
@@ -237,13 +266,13 @@ export default function SimulationScreen() {
         aria-label="Conversation history"
       >
         <div className="max-w-md mx-auto space-y-3 sm:space-y-4">
-          {conversationHistory.length === 0 && (
+          {conversationHistory.length === 0 && !hasStarted && (
             <motion.p
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               className="text-center text-clean-gray-400 py-6 sm:py-8 text-sm sm:text-base px-4"
             >
-              Tap the microphone to start your pitch
+              Click &quot;Start Simulation&quot; to begin your sales pitch
             </motion.p>
           )}
           
@@ -334,29 +363,50 @@ export default function SimulationScreen() {
         </div>
       </main>
 
-      {/* Action Button Footer - contentinfo landmark */}
+      {/* Footer with status indicator */}
       <footer 
         className="p-4 sm:p-6 border-t border-clean-gray-200 shrink-0 safe-area-inset-bottom"
         role="contentinfo"
       >
-        <div className="flex justify-center">
-          <ActionButton 
-            state={buttonState} 
-            onClick={handleActionButtonClick}
-            isLoading={isLoading}
-          />
+        <div className="flex flex-col items-center gap-3">
+          {!hasStarted ? (
+            <button
+              onClick={handleStartSimulation}
+              disabled={!isSupported}
+              className="px-6 py-3 bg-primary text-white rounded-full font-medium hover:bg-primary-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-primary-300"
+            >
+              Start Simulation
+            </button>
+          ) : (
+            <>
+              {/* Voice activity indicator */}
+              <div className="flex items-center gap-2">
+                <motion.div
+                  className={`w-3 h-3 rounded-full ${
+                    isSpeaking 
+                      ? "bg-red-500" 
+                      : isListening 
+                        ? "bg-green-500" 
+                        : "bg-clean-gray-300"
+                  }`}
+                  animate={isSpeaking ? { scale: [1, 1.2, 1] } : {}}
+                  transition={{ duration: 0.3, repeat: Infinity }}
+                />
+                <span className="text-sm text-clean-gray-500">
+                  {isLoading 
+                    ? "Processing..." 
+                    : isPlaying 
+                      ? "Customer speaking..." 
+                      : isSpeaking 
+                        ? "Listening to you..." 
+                        : isListening 
+                          ? "Ready - speak anytime" 
+                          : "Paused"}
+                </span>
+              </div>
+            </>
+          )}
         </div>
-        {isListening && (
-          <motion.p 
-            initial={{ opacity: 0, y: 5 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center text-xs sm:text-sm text-clean-gray-500 mt-2"
-            role="status"
-            aria-live="polite"
-          >
-            Listening... Tap to send
-          </motion.p>
-        )}
       </footer>
 
       {/* Game Over Screen - Requirements 5.1, 5.4 */}

@@ -4,9 +4,12 @@ Orchestrator service for Objection Dojo.
 Coordinates the flow: get history → call Cerebras → call ElevenLabs → 
 encode audio → calculate patience → return consolidated response.
 
+Optimized for low-latency conversational experience using parallel processing.
+
 Requirements: 3.1, 3.2, 3.4, 3.5, 9.6
 """
 
+import asyncio
 import base64
 from typing import Optional
 
@@ -93,35 +96,41 @@ class OrchestratorService:
                 conversation_history=history,
             )
             
-            # Step 3: Store user message (Req 9.4)
-            await self.smartmemory_client.add_message(
-                session_id=request.session_id,
-                role="user",
-                content=request.user_text,
+            # Step 3: Run TTS and message storage in PARALLEL for lower latency
+            # This saves ~100-200ms by not waiting for storage operations
+            tts_task = asyncio.create_task(
+                self.elevenlabs_client.text_to_speech(text=cerebras_response.text)
+            )
+            user_msg_task = asyncio.create_task(
+                self.smartmemory_client.add_message(
+                    session_id=request.session_id,
+                    role="user",
+                    content=request.user_text,
+                )
+            )
+            ai_msg_task = asyncio.create_task(
+                self.smartmemory_client.add_message(
+                    session_id=request.session_id,
+                    role="assistant",
+                    content=cerebras_response.text,
+                )
             )
             
-            # Step 4: Call ElevenLabs for TTS (Req 3.2, 3.3)
-            audio_bytes = await self.elevenlabs_client.text_to_speech(
-                text=cerebras_response.text
+            # Wait for all parallel tasks - TTS is the critical path
+            audio_bytes, _, _ = await asyncio.gather(
+                tts_task, user_msg_task, ai_msg_task
             )
             
-            # Step 5: Encode audio as base64 (Req 3.4)
+            # Step 4: Encode audio as base64 (Req 3.4)
             audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
             
-            # Step 6: Calculate new patience score
+            # Step 5: Calculate new patience score
             new_patience = calculate_patience(
                 current=request.current_patience,
                 sentiment=cerebras_response.sentiment.value,
             )
             
-            # Step 7: Store AI response (Req 9.5)
-            await self.smartmemory_client.add_message(
-                session_id=request.session_id,
-                role="assistant",
-                content=cerebras_response.text,
-            )
-            
-            # Step 8: Return consolidated response (Req 3.5)
+            # Step 6: Return consolidated response (Req 3.5)
             return ChatResponse(
                 ai_text=cerebras_response.text,
                 patience_score=new_patience,

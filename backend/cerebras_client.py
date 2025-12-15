@@ -68,7 +68,7 @@ class CerebrasClient:
     Requirements: 3.1, 10.1, 10.2, 10.3
     """
     
-    DEFAULT_MODEL = "llama-4-scout-17b-16e-instruct"
+    DEFAULT_MODEL = "llama-3.3-70b"
     MAX_RETRIES = 2
     
     def __init__(
